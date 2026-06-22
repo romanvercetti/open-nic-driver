@@ -708,6 +708,17 @@ static void onic_clear_rx_queue(struct onic_private *priv, u16 qid)
 	if (!q)
 		return;
 
+	/*
+	 * Publish the removal before tearing the queue down, then wait for any
+	 * in-flight onic_q_handler on this vector to drain, so the hard-IRQ
+	 * handler can never observe a half-freed queue.  Pairs with the
+	 * READ_ONCE() in onic_q_handler().  (The queue IRQ stays armed across
+	 * ndo_stop -- free_irq only runs at device remove -- so this is the
+	 * only thing standing between a late device interrupt and a UAF.)
+	 */
+	WRITE_ONCE(priv->rx_queue[qid], NULL);
+	synchronize_irq(pci_irq_vector(priv->pdev, qid));
+
 	onic_qdma_clear_rx_queue(priv->hw.qdma, qid);
 
 	napi_disable(&q->napi);
@@ -742,7 +753,7 @@ static void onic_clear_rx_queue(struct onic_private *priv, u16 qid)
 	page_pool_destroy(q->page_pool);
 	q->page_pool = NULL;
 	kfree(q);
-	priv->rx_queue[qid] = NULL;
+	/* priv->rx_queue[qid] was already cleared (WRITE_ONCE) above */
 }
 
 
@@ -927,7 +938,9 @@ static int onic_init_rx_queue(struct onic_private *priv, u16 qid)
 	onic_set_rx_head(priv->hw.qdma, qid, q->desc_ring.next_to_use);
 	onic_set_completion_tail(priv->hw.qdma, qid, 0, 1);
 
-	priv->rx_queue[qid] = q;
+	/* publish last: napi is already added+enabled, so once onic_q_handler
+	 * can observe this queue it is fully initialized (pairs with READ_ONCE) */
+	WRITE_ONCE(priv->rx_queue[qid], q);
 	return 0;
 
 clear_rx_queue:
@@ -1112,6 +1125,12 @@ int onic_do_ioctl(struct net_device *dev, struct ifreq *ifr, int cmd)
 int onic_change_mtu(struct net_device *dev, int mtu)
 {
 	netdev_info(dev, "Requested MTU = %d", mtu);
+	/* When a driver supplies ndo_change_mtu, the core does NOT update dev->mtu
+	 * itself (see __dev_set_mtu) — the driver must. The original stub returned 0
+	 * without applying it, so the MTU never actually changed. RX buffers are
+	 * sized from dev->mtu at ndo_open (onic_create_page_pool: mtu + ETH_HLEN),
+	 * so change the MTU while the link is DOWN, then bring it UP. */
+	WRITE_ONCE(dev->mtu, mtu);
 	return 0;
 }
 

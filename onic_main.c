@@ -205,6 +205,12 @@ static int onic_probe(struct pci_dev *pdev, const struct pci_device_id *ent)
 	SET_NETDEV_DEV(netdev, &pdev->dev);
 	netdev->netdev_ops = &onic_netdev_ops;
 	onic_set_ethtool_ops(netdev);
+	/* The ML-KEM accelerator C2H response is 3584 B and the OpenNIC datapath
+	 * supports jumbo frames up to 9600 B. The default max_mtu (1500) would drop
+	 * that response, so raise the MTU bounds. RX buffers are sized from the MTU
+	 * (onic_create_page_pool: mtu + ETH_HLEN), so bounce the link after changing. */
+	netdev->min_mtu = ETH_MIN_MTU;
+	netdev->max_mtu = 9600;
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(6,3,0)
 	xdp_set_features_flag(netdev, NETDEV_XDP_ACT_BASIC | NETDEV_XDP_ACT_REDIRECT);
 #endif

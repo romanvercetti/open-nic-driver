@@ -26,13 +26,34 @@ extern int onic_poll(struct napi_struct *napi, int budget);
 static irqreturn_t onic_q_handler(int irq, void *dev_id)
 {
 	struct onic_q_vector *vec = dev_id;
-	struct onic_private *priv = vec->priv;
-	u16 qid = vec->vid;
-	struct onic_rx_queue *rxq = priv->rx_queue[qid];
+	struct onic_private *priv;
+	struct onic_rx_queue *rxq;
+	u16 qid;
 	bool debug = 0;
+
+	if (unlikely(!vec || !vec->priv))
+		return IRQ_NONE;
+	priv = vec->priv;
+	qid = vec->vid;
+
+	/*
+	 * Queue-interrupt vectors are armed at probe (onic_init_interrupt),
+	 * but priv->rx_queue[] is only populated at ndo_open and is torn down
+	 * at ndo_stop.  An interrupt that arrives outside that window -- a stale
+	 * IRQ during driver reload, or a misbehaving/uninitialized bitstream
+	 * that asserts before the queues exist -- must never be allowed to
+	 * dereference a NULL or half-freed queue and panic the host.  Pairs with
+	 * the WRITE_ONCE()/synchronize_irq() teardown in onic_clear_rx_queue().
+	 */
+	if (unlikely(qid >= priv->num_rx_queues))
+		return IRQ_HANDLED;
+
+	rxq = READ_ONCE(priv->rx_queue[qid]);
+	if (unlikely(!rxq))
+		return IRQ_HANDLED;
+
 	if (debug) dev_info(&priv->pdev->dev, "queue irq");
 
-	//napi_schedule(&rxq->napi);
 	napi_schedule_irqoff(&rxq->napi);
 	return IRQ_HANDLED;
 }
